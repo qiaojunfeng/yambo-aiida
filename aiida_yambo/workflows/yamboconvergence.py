@@ -175,17 +175,19 @@ class YamboConvergence(WorkChain):
         if self.ctx.calc_manager['iter'] == 1: self.ctx.params_space = copy.deepcopy(self.ctx.workflow_manager['parameter_space'])
         for i in range(self.ctx.calc_manager['steps']):
             #self.report(parameter)
+
             self.ctx.calc_inputs, value, already_done, parent_nscf = updater(self.ctx.calc_manager, 
                                                 self.ctx.calc_inputs,
                                                 self.ctx.params_space, 
                                                 self.ctx.workflow_manager)
+                                    
             self.ctx.workflow_manager['values'].append(value)
             self.report('New parameters are: {}'.format(value))
             self.report('Preparing iteration #{} on: {}'.format((self.ctx.calc_manager['iter']-1)*self.ctx.calc_manager['steps']+i+1,
                         value))
             if not already_done:
                 self.ctx.calc_inputs.metadata.call_link_label = 'iteration_'+str(self.ctx.workflow_manager['global_step']+i)
-                if parent_nscf:
+                if parent_nscf and not hasattr(self.ctx.calc_inputs,'parent_folder'):
                     self.report('Recovering NSCF/P2Y parent: {}'.format(parent_nscf))
                 future = self.submit(YamboWorkflow, **self.ctx.calc_inputs)
             else:
@@ -281,30 +283,34 @@ class YamboConvergence(WorkChain):
         
         if self.ctx.how_bands == 'single-step' and 'BndsRnXp' in self.ctx.calc_manager['var']:
             space_index = self.ctx.calc_manager['steps']*(1+self.ctx.calc_manager['iter'])
-            self.report('Max #bands needed in this step = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][-1]))
+            self.report('Max #bands needed in this step = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][0][-1]))
         elif self.ctx.how_bands == 'single-step' and 'GbndRnge' in self.ctx.calc_manager['var']:
             space_index = self.ctx.calc_manager['steps']*(1+self.ctx.calc_manager['iter'])
-            self.report('Max #bands needed in this step = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][-1]))
+            self.report('Max #bands needed in this step = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][0][-1]))
 
         elif self.ctx.how_bands == 'full-step' and 'BndsRnXp' in self.ctx.calc_manager['var']:
             space_index = self.ctx.calc_manager['steps']*self.ctx.calc_manager['max_iterations']
-            self.report('Max #bands needed in this iteration = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][-1]))
+            self.report('Max #bands needed in this iteration = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][0][-1]))
         elif self.ctx.how_bands == 'full-step' and 'GbndRnge' in self.ctx.calc_manager['var']:
             space_index = self.ctx.calc_manager['steps']*self.ctx.calc_manager['max_iterations']
-            self.report('Max #bands needed in this iteration = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][-1]))
+            self.report('Max #bands needed in this iteration = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][0][-1]))
 
         elif self.ctx.how_bands == 'all-at-once' or  isinstance(self.ctx.how_bands, int):
             space_index = 0
-        
+            if 'BndsRnXp' in self.ctx.workflow_manager['parameter_space'].keys(): 
+                self.report('Max #bands needed in the whole convergence = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][0][-1]))
+  
         else:
             space_index = 0
-
+            if 'BndsRnXp' in self.ctx.workflow_manager['parameter_space'].keys(): 
+                self.report('Max #bands needed in the whole convergence = {}'.format(self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][0][-1]))
+        
         if 'BndsRnXp' in self.ctx.workflow_manager['parameter_space'].keys():
-            yambo_bandsX = self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][-1]
+            yambo_bandsX = self.ctx.workflow_manager['parameter_space']['BndsRnXp'][space_index-1][0][-1]
         else:
             yambo_bandsX = 0 
         if 'GbndRnge' in self.ctx.workflow_manager['parameter_space'].keys():
-            yambo_bandsSc = self.ctx.workflow_manager['parameter_space']['GbndRnge'][space_index-1][-1]
+            yambo_bandsSc = self.ctx.workflow_manager['parameter_space']['GbndRnge'][space_index-1][0][-1]
         else:
             yambo_bandsSc = 0
 
@@ -316,36 +322,14 @@ class YamboConvergence(WorkChain):
         if 'kpoint_mesh' in self.ctx.calc_manager['var'] or 'kpoint_density' in self.ctx.calc_manager['var']:
             self.report('Not needed, we start with k-points')
             return False
-        
-        if hasattr(self.inputs, 'precalc_inputs'):
-            self.report('Yes, we will do a preliminary calculation')
 
-        already_done, parent_nscf, parent_scf = search_in_group(self.ctx.calc_inputs, 
-                                               self.ctx.workflow_manager['group'],
-                                               only_pw = True)
-    
-        if parent_nscf:
-            try:
-                parent_folder =  load_node(parent_nscf).outputs.remote_folder 
-            except:
-                pass
-        elif parent_scf:
-            try:
-                parent_folder =  load_node(parent_nscf).outputs.remote_folder 
-            except:
-                pass
-        
         try:
-            scf_params, nscf_params, redo_nscf, self.ctx.bands, messages = quantumespresso_input_validator(self.inputs.ywfl)
-            try:
-                set_parent(self.ctx.calc_inputs, self.inputs.ywfl.parent_folder)
-            except:
-                set_parent(self.ctx.calc_inputs, parent_folder) #from check identical _calc
-
+            scf_params, nscf_params, redo_nscf, self.ctx.bands, messages = quantumespresso_input_validator(self.ctx.calc_inputs)
             parent_calc = take_calc_from_remote(self.ctx.calc_inputs.parent_folder)        
             
             nbnd = nscf_params.get_dict()['SYSTEM']['nbnd']
-        
+            self.ctx.gwbands = max(self.ctx.gwbands,self.ctx.bands)
+
             if nbnd < self.ctx.gwbands:
                 self.report('we have to compute the nscf part: not enough bands, we need {} bands to complete all the calculations'.format(self.ctx.gwbands))
                 set_parent(self.ctx.calc_inputs, find_pw_parent(parent_calc, calc_type = ['scf']))
@@ -361,9 +345,24 @@ class YamboConvergence(WorkChain):
                 return True
         except:
             try:
-                set_parent(self.ctx.calc_inputs, find_pw_parent(parent_calc, calc_type = ['scf']))
-                self.report('yes, no yambo parent, setting parent scf')
-                return True
+                already_done, parent_nscf = search_in_group(self.ctx.calc_inputs, 
+                                            self.ctx.workflow_manager['group'], up_to_p2y = True)
+            
+                if already_done: 
+                    set_parent(self.ctx.calc_inputs, load_node(p2y_par))
+                    self.report('setting parent yambo found in group...')
+                    return True
+                
+                elif parent_nscf: 
+                    set_parent(self.ctx.calc_inputs, load_node(parent_nscf))
+                    self.report('yes, no yambo parent, setting parent nscf found in group')
+                    return True
+                
+                else: 
+                    parent_calc = take_calc_from_remote(self.ctx.calc_inputs.parent_folder)              
+                    set_parent(self.ctx.calc_inputs, find_pw_parent(parent_calc, calc_type = ['scf']))
+                    self.report('yes, no yambo parent, setting parent scf')
+                    return True
             except:
                 self.report('no available parent folder, so we start from scratch')
                 return True
@@ -372,13 +371,17 @@ class YamboConvergence(WorkChain):
         self.ctx.pre_inputs = self.exposed_inputs(YamboWorkflow, 'ywfl')
         self.ctx.pre_inputs.yres.clean_workdir = Bool(False)
 
+        if hasattr(self.ctx.calc_inputs, 'parent_folder'):
+            set_parent(self.ctx.pre_inputs, self.ctx.calc_inputs.parent_folder)
+
         if hasattr(self.inputs, 'precalc_inputs'):
             self.ctx.calculation_type='pre_yambo'
             self.ctx.pre_inputs.yres.yambo.parameters = self.inputs.precalc_inputs
             self.ctx.pre_inputs.additional_parsing = List(list=self.ctx.workflow_settings['what'])
         else:
             self.ctx.calculation_type='p2y'
-            self.ctx.pre_inputs.yres.yambo.parameters = update_dict(self.ctx.pre_inputs.yres.yambo.parameters, ['GbndRnge','BndsRnXp'], [[1,self.ctx.gwbands],[1,self.ctx.gwbands]])
+            self.ctx.pre_inputs.yres.yambo.parameters = update_dict(self.ctx.pre_inputs.yres.yambo.parameters, 
+                                                            ['GbndRnge','BndsRnXp'], [[[1,self.ctx.gwbands],''],[[1,self.ctx.gwbands],'']],sublevel='variables')
             #self.report(self.ctx.pre_inputs.yres.yambo.parameters.get_dict())
             self.ctx.pre_inputs.yres.yambo.settings = update_dict(self.ctx.pre_inputs.yres.yambo.settings, 'INITIALISE', True)
             if hasattr(self.ctx.pre_inputs, 'additional_parsing'):

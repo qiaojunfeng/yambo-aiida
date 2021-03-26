@@ -32,9 +32,11 @@ def find_pw_parent(parent_calc, calc_type = ['scf', 'nscf']):
 
     has_found_pw = False
     while (not has_found_pw):
-        if parent_calc.process_type=='aiida.calculations:yambo.yambo':
+        if parent_calc.process_type=='aiida.calculations:yambo.yambo' or parent_calc.process_type=='aiida.workflows:yambo.yambo.yambowf':
             has_found_pw = False
             parent_calc = find_parent(parent_calc)
+            if parent_calc.process_type=='aiida.workflows:quantumespresso.pw.base':
+                parent_calc = parent_calc.called[0]
             if parent_calc.process_type=='aiida.calculations:quantumespresso.pw' and \
                 find_pw_type(parent_calc) in calc_type:
                 has_found_pw = True
@@ -73,15 +75,25 @@ def find_table_ind(kpoint,band,_array_ndb):
             return(i)
 
 
-def update_dict(_dict, whats, hows):
-    if not isinstance(whats, list):
-        whats = [whats]
-    if not isinstance(hows, list):
-        hows = [hows] 
-    for what,how in zip(whats,hows):    
-        new = _dict.get_dict()
-        new[what] = how
-        _dict = Dict(dict=new)
+def update_dict(_dict, whats, hows, sublevel=None):
+    if sublevel:
+        if not isinstance(whats, list):
+            whats = [whats]
+        if not isinstance(hows, list):
+            hows = [hows] 
+        for what,how in zip(whats,hows):    
+            new = _dict.get_dict()
+            new[sublevel][what] = how
+            _dict = Dict(dict=new)
+    else:
+        if not isinstance(whats, list):
+            whats = [whats]
+        if not isinstance(hows, list):
+            hows = [hows] 
+        for what,how in zip(whats,hows):    
+            new = _dict.get_dict()
+            new[what] = how
+            _dict = Dict(dict=new)
     return _dict
 
 def get_caller(calc_pk, depth = 1):
@@ -204,11 +216,12 @@ def find_pw_info(calc):
 
 def find_gw_info(inputs):
 
-    parameters = inputs.parameters.get_dict()
+    parameters = copy.deepcopy(inputs.parameters.get_dict())
     
     ## bands ##
-    BndsRnXp = parameters.pop('BndsRnXp',0)
-    GbndRnge = parameters.pop('GbndRnge',0)
+
+    BndsRnXp = parameters['variables'].pop('BndsRnXp',[[0],''])[0]
+    GbndRnge = parameters['variables'].pop('GbndRnge',[[0],''])[0]
     X_b = 1 + BndsRnXp[1] - BndsRnXp[0]
     SE_b = 1 + GbndRnge[1] - GbndRnge[0]
     if X_b and SE_b:
@@ -225,15 +238,14 @@ def find_gw_info(inputs):
 
     qp = 0
     last_qp = 0
-    for i in parameters['QPkrange']:
+    for i in parameters['variables']['QPkrange'][0]:
         qp += (1 + i[1]-i[0])*(1 + i[3]-i[2])
         last_qp = max(i[3],last_qp)
 
     ## runlevels ##
     runlevels = []
-    for i in parameters.keys():
-        if parameters[i] == True:
-            runlevels.append(i)
+    for i in parameters['arguments']:
+        runlevels.append(i)
     
     return bands, qp, last_qp, runlevels
 
@@ -451,15 +463,18 @@ def check_identical_calculation(YamboWorkflow_inputs,
 
     return already_done, parent_nscf 
 
-def check_same_yambo(node, params_to_calc, k_mesh_to_calc,what):
+def check_same_yambo(node, params_to_calc, k_mesh_to_calc,what,up_to_p2y=False):
     already_done = False
     try:
         if node.is_finished_ok:
             same_k = k_mesh_to_calc == node.inputs.nscf__kpoints.get_kpoints_mesh()
             old_params = node.inputs.yres__yambo__parameters.get_dict()
             for p in what:
-                #print(p,params_to_calc[p],old_params[p])
-                if params_to_calc[p] == old_params[p] and same_k:
+                print(p,params_to_calc[p],old_params[p])
+                if up_to_p2y and same_k:
+                    already_done = node.pk
+                    break
+                elif params_to_calc['variables'][p][0] == old_params['variables'][p][0] and same_k:
                     already_done = node.pk
                 else:
                     already_done = False
@@ -474,17 +489,17 @@ def check_same_pw(node, k_mesh_to_calc, already_done):
     parent_nscf = False
     parent_scf = False
     try:
-        if  not already_done and not node.is_finished_ok:
-            print(old)
-            parent_nscf_try = find_pw_parent(load_node(old).called[0], calc_type=['nscf'])
-            parent_scf_try = find_pw_parent(load_node(old).called[0], calc_type=['scf'])
-            same_k = k_mesh_to_calc == load_node(old).inputs.nscf__kpoints.get_kpoints_mesh()
-            try:
-                y = load_node(old).outputs.retrieved._repository._repo_folder.abspath+'/path/'
-                if 'ns.db1' in  os.listdir(y) and same_k:
-                    parent_nscf = old                    
-            except:
-                pass
+        if not already_done:
+            
+            parent_nscf_try = find_pw_parent(node, calc_type=['nscf'])
+            same_k = k_mesh_to_calc == node.inputs.nscf__kpoints.get_kpoints_mesh()
+            if node.is_finished_ok:
+                try:
+                    y = node.outputs.retrieved._repository._repo_folder.abspath+'/path/'
+                    if 'ns.db1' in  os.listdir(y) and same_k:
+                        parent_nscf = node.pk                    
+                except:
+                    pass
             if same_k and parent_nscf_try.is_finished_ok: 
                 parent_nscf = parent_nscf_try.pk     
             if parent_scf_try.is_finished_ok: 
@@ -500,7 +515,7 @@ def search_in_group(YamboWorkflow_inputs,
                                 what=['BndsRnXp','GbndRnge','NGsBlkXp',],
                                 full = True,
                                 exclude = ['CPU','ROLEs','QPkrange'],
-                                only_pw = False):
+                                up_to_p2y = False):
 
     already_done = False
     parent_nscf = False
@@ -524,17 +539,15 @@ def search_in_group(YamboWorkflow_inputs,
                 if e in p: 
                     what.remove(p)     
     
-    if not only_pw:
-        for old in YamboWorkflow_group.nodes:
-            if old.process_type == 'aiida.workflows:yambo.yambo.yamboconvergence':
-                for i in old.called:
-                    already_done = check_same_yambo(i, params_to_calc,k_mesh_to_calc,what)
-                    if already_done: break
+    for old in YamboWorkflow_group.nodes:
+        if old.process_type == 'aiida.workflows:yambo.yambo.yamboconvergence':
+            for i in old.called:
+                already_done = check_same_yambo(i, params_to_calc,k_mesh_to_calc,what,up_to_p2y=up_to_p2y)
+                if already_done: break
 
-            elif old.process_type == 'aiida.workflows:yambo.yambo.yambowf':
-                already_done = check_same_yambo(old, params_to_calc,k_mesh_to_calc,what)
-            
-            if already_done: break
+        elif old.process_type == 'aiida.workflows:yambo.yambo.yambowf':
+            already_done = check_same_yambo(old, params_to_calc,k_mesh_to_calc,what,up_to_p2y=up_to_p2y)        
+        if already_done: break
             
     for old in YamboWorkflow_group.nodes:
         if old.process_type == 'aiida.workflows:yambo.yambo.yamboconvergence':
@@ -543,7 +556,7 @@ def search_in_group(YamboWorkflow_inputs,
                 if parent_nscf: break
         
         elif old.process_type == 'aiida.workflows:yambo.yambo.yambowf':
-            parent_nscf, parent_scf = check_same_pw(old, k_mesh_to_calc, already_done)
+            parent_nscf = check_same_nscf(old, k_mesh_to_calc, already_done)
         
         if parent_nscf: break
 
